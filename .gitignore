@@ -1,0 +1,31 @@
+# Python Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Secrets & Environment Files
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+
+# Logs & Temporary Files
+*.log
+*.tmp
+prediction_*.json
+Report_data_csv/
+
+# IDEs & OS Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+[Dd]esktop.ini
+
