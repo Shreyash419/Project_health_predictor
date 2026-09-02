@@ -108,8 +108,15 @@ def main():
         print(f"    Forecasted Total Schedule Extension  : {pred.get('predicted_total_schedule_extension_months'):.2f} months")
 
     print(f"\n--- [4. TOP RISK DRIVERS (SHAP)] ---")
+    shap_header_map = {
+        "time_3m": "Schedule Delay Risk Drivers (3-Month Horizon)",
+        "time_6m": "Schedule Delay Risk Drivers (6-Month Horizon)",
+        "cost_3m": "Cost Escalation Risk Drivers (3-Month Horizon)",
+        "cost_6m": "Cost Escalation Risk Drivers (6-Month Horizon)",
+    }
     for model_name, explanation in result.get("explanations", {}).items():
-        print(f"\n  {model_name}:")
+        hdr = shap_header_map.get(model_name, model_name)
+        print(f"\n  {hdr}:")
         for driver in explanation.get("top_risk_drivers", [])[:5]:
             print(f"    {driver['feature']:<35}: {driver['shap_value']:+.4f}")
 

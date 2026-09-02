@@ -10,6 +10,21 @@ import shap
 from typing import Dict, Any, List, Optional
 
 
+def _extract_base_tree_model(model):
+    """Extract underlying tree model from calibration wrapper if present."""
+    if hasattr(model, "calibrated_classifiers_") and len(model.calibrated_classifiers_) > 0:
+        cc = model.calibrated_classifiers_[0]
+        if hasattr(cc, "estimator"):
+            return cc.estimator
+        elif hasattr(cc, "base_estimator"):
+            return cc.base_estimator
+    if hasattr(model, "estimator") and model.estimator is not None:
+        return model.estimator
+    if hasattr(model, "base_estimator") and model.base_estimator is not None:
+        return model.base_estimator
+    return model
+
+
 def get_shap_explanation(model, X: np.ndarray, feature_names: List[str],
                          top_n: int = 10) -> Dict[str, Any]:
     """
@@ -18,7 +33,7 @@ def get_shap_explanation(model, X: np.ndarray, feature_names: List[str],
     Parameters
     ----------
     model : fitted model
-        XGBoost model (classifier or regressor).
+        XGBoost model (classifier or regressor, raw or calibrated).
     X : np.ndarray
         Single-row feature matrix (1, n_features).
     feature_names : list
@@ -31,7 +46,8 @@ def get_shap_explanation(model, X: np.ndarray, feature_names: List[str],
     dict
         Explanation with top positive/negative drivers and all contributions.
     """
-    explainer = shap.TreeExplainer(model)
+    tree_model = _extract_base_tree_model(model)
+    explainer = shap.TreeExplainer(tree_model)
     shap_values = explainer.shap_values(X)
 
     # For binary classifier, shap_values may be 2D
@@ -101,7 +117,8 @@ def get_global_feature_importance(model, X: np.ndarray,
     else:
         X_sample = X
 
-    explainer = shap.TreeExplainer(model)
+    tree_model = _extract_base_tree_model(model)
+    explainer = shap.TreeExplainer(tree_model)
     shap_values = explainer.shap_values(X_sample)
 
     if isinstance(shap_values, list):

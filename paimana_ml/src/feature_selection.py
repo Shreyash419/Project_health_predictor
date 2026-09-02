@@ -113,21 +113,25 @@ def enrich_trajectory_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.sort_values(["project_id", "report_month"]).copy()
 
-    # Progress vs Expenditure gap
-    prog = df["physical_progress_pct"].fillna(0)
-    exp = df["expenditure_ratio_pct"].fillna(0)
+    # Progress vs Expenditure gap (preserve NaN for sklearn imputer)
+    prog = df["physical_progress_pct"]
+    exp = df["expenditure_ratio_pct"]
     df["progress_minus_expenditure_gap"] = prog - exp
     df["expenditure_minus_progress_gap"] = exp - prog
 
-    # Under budget flag (preserves negative cost overrun semantics)
-    df["cost_overrun_negative_flag"] = (df["cost_overrun_pct"] < 0).astype(float)
+    # Under budget flag (preserves negative cost overrun semantics, preserves NaN if unknown)
+    df["cost_overrun_negative_flag"] = np.where(
+        df["cost_overrun_pct"].isna(),
+        np.nan,
+        (df["cost_overrun_pct"] < 0).astype(float)
+    )
 
     # Schedule flags
     status = df["schedule_status"].fillna("")
-    overdue_d = df["overdue_days"].fillna(0)
-    ext_mo = df["schedule_extension_months"].fillna(0)
-    df["is_overdue_flag"] = ((status == "OVERDUE") | (overdue_d > 0)).astype(float)
-    df["is_extended_flag"] = ((status == "EXTENDED") | (ext_mo > 0)).astype(float)
+    overdue_d = df["overdue_days"]
+    ext_mo = df["schedule_extension_months"]
+    df["is_overdue_flag"] = ((status == "OVERDUE") | (overdue_d.fillna(0) > 0)).astype(float)
+    df["is_extended_flag"] = ((status == "EXTENDED") | (ext_mo.fillna(0) > 0)).astype(float)
 
     # Consecutive stagnant months (months where progress delta <= 0.1)
     stagnant_counts = []

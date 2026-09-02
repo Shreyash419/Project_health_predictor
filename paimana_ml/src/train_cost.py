@@ -119,20 +119,41 @@ def train_cost_models(df: pd.DataFrame, config: dict,
             baseline_cls_metrics.append(b_metrics)
             print_metrics(b_metrics, f"Baseline (LogReg) Fold {i + 1}")
 
-            # Candidate: XGBoost with probability calibration
+            # Candidate: XGBoost with time-safe chronological calibration
             xgb_params = config["models"]["xgboost"].copy()
-            xgb_model = XGBClassifier(
-                **xgb_params,
-                scale_pos_weight=scale_pos,
-                eval_metric="logloss"
-            )
-            xgb_model.fit(X_train, y_train)
 
-            if calibrate and len(np.unique(y_train)) > 1:
-                calibrated_model = CalibratedClassifierCV(xgb_model, method=calib_method, cv="prefit")
-                calibrated_model.fit(X_val, y_val)
-                xgb_proba = calibrated_model.predict_proba(X_val)[:, 1]
+            # Split train fold chronologically for calibration if multiple months exist
+            train_months_in_fold = sorted(df.loc[fold["train_indices"], "report_month"].unique())
+            if calibrate and len(train_months_in_fold) >= 3 and len(np.unique(y_train)) > 1:
+                calib_split_idx = max(1, int(len(train_months_in_fold) * 0.75))
+                calib_cutoff = train_months_in_fold[calib_split_idx]
+
+                sub_train_mask = df.loc[fold["train_indices"], "report_month"] < calib_cutoff
+                calib_mask = df.loc[fold["train_indices"], "report_month"] >= calib_cutoff
+
+                X_tr_sub = X_train[sub_train_mask.values]
+                y_tr_sub = y_train[sub_train_mask.values]
+                X_cal = X_train[calib_mask.values]
+                y_cal = y_train[calib_mask.values]
+
+                if len(np.unique(y_tr_sub)) > 1 and len(np.unique(y_cal)) > 1:
+                    sub_pos = (y_tr_sub == 1).sum()
+                    sub_neg = (y_tr_sub == 0).sum()
+                    sub_scale = max(float(sub_neg / max(sub_pos, 1)), 1.0)
+
+                    base_xgb = XGBClassifier(**xgb_params, scale_pos_weight=sub_scale, eval_metric="logloss")
+                    base_xgb.fit(X_tr_sub, y_tr_sub)
+
+                    calibrated_model = CalibratedClassifierCV(base_xgb, method=calib_method, cv="prefit")
+                    calibrated_model.fit(X_cal, y_cal)
+                    xgb_proba = calibrated_model.predict_proba(X_val)[:, 1]
+                else:
+                    xgb_model = XGBClassifier(**xgb_params, scale_pos_weight=scale_pos, eval_metric="logloss")
+                    xgb_model.fit(X_train, y_train)
+                    xgb_proba = xgb_model.predict_proba(X_val)[:, 1]
             else:
+                xgb_model = XGBClassifier(**xgb_params, scale_pos_weight=scale_pos, eval_metric="logloss")
+                xgb_model.fit(X_train, y_train)
                 xgb_proba = xgb_model.predict_proba(X_val)[:, 1] if len(np.unique(y_train)) > 1 else np.zeros(len(y_val))
 
             x_metrics = evaluate_classifier(y_val, xgb_proba)
@@ -144,7 +165,7 @@ def train_cost_models(df: pd.DataFrame, config: dict,
         agg_xgb = aggregate_fold_metrics(xgb_cls_metrics)
         print_comparison(agg_baseline, agg_xgb, f"Incremental Cost Classifier {horizon}M")
 
-        # Retrain final model on all labeled data
+        # Retrain final model on all labeled data with chronological calibration
         print(f"\n  Retraining final Incremental Cost Classifier {horizon}M on all labeled data...")
         labeled_mask = df[cls_target].notna()
         labeled_df = df[labeled_mask]
@@ -157,15 +178,38 @@ def train_cost_models(df: pd.DataFrame, config: dict,
         n_neg_all = (y_all == 0).sum()
         scale_pos_all = max(float(n_neg_all / max(n_pos_all, 1)), 1.0)
 
-        final_xgb = XGBClassifier(
-            **config["models"]["xgboost"],
-            scale_pos_weight=scale_pos_all,
-            eval_metric="logloss"
-        )
-        final_xgb.fit(X_all, y_all)
+        all_months_labeled = sorted(labeled_df["report_month"].unique())
+        if calibrate and len(all_months_labeled) >= 3 and len(np.unique(y_all)) > 1:
+            calib_split_idx = max(1, int(len(all_months_labeled) * 0.80))
+            calib_cutoff = all_months_labeled[calib_split_idx]
+
+            sub_mask = (labeled_df["report_month"] < calib_cutoff).values
+            cal_mask = (labeled_df["report_month"] >= calib_cutoff).values
+
+            X_tr_sub = X_all[sub_mask]
+            y_tr_sub = y_all[sub_mask]
+            X_cal = X_all[cal_mask]
+            y_cal = y_all[cal_mask]
+
+            if len(np.unique(y_tr_sub)) > 1 and len(np.unique(y_cal)) > 1:
+                sub_pos = (y_tr_sub == 1).sum()
+                sub_neg = (y_tr_sub == 0).sum()
+                sub_scale = max(float(sub_neg / max(sub_pos, 1)), 1.0)
+
+                base_final_xgb = XGBClassifier(**config["models"]["xgboost"], scale_pos_weight=sub_scale, eval_metric="logloss")
+                base_final_xgb.fit(X_tr_sub, y_tr_sub)
+
+                final_model_to_save = CalibratedClassifierCV(base_final_xgb, method=calib_method, cv="prefit")
+                final_model_to_save.fit(X_cal, y_cal)
+            else:
+                final_model_to_save = XGBClassifier(**config["models"]["xgboost"], scale_pos_weight=scale_pos_all, eval_metric="logloss")
+                final_model_to_save.fit(X_all, y_all)
+        else:
+            final_model_to_save = XGBClassifier(**config["models"]["xgboost"], scale_pos_weight=scale_pos_all, eval_metric="logloss")
+            final_model_to_save.fit(X_all, y_all)
 
         # Save model and preprocessor
-        joblib.dump(final_xgb, models_dir / f"cost_classifier_{horizon}m.pkl")
+        joblib.dump(final_model_to_save, models_dir / f"cost_classifier_{horizon}m.pkl")
         joblib.dump(final_preprocessor, models_dir / "preprocessing" / f"cost_cls_{horizon}m_preprocessor.pkl")
         print(f"  [OK] Saved cost_classifier_{horizon}m.pkl")
 

@@ -112,8 +112,15 @@ def generate_time_targets(df: pd.DataFrame, horizon_months: int,
 
     df_sorted = df.sort_values(["project_id", "report_month"]).copy()
 
-    # Fill NaNs in schedule extension safely with 0 for computation
-    df_sorted["_clean_ext"] = df_sorted["schedule_extension_months"].fillna(0.0)
+    # Clean extension: for projects explicitly ON_TRACK, missing extension is 0.0, otherwise preserve missingness
+    ext_series = df_sorted["schedule_extension_months"].copy()
+    if "schedule_status" in df_sorted.columns:
+        ext_series = np.where(
+            ext_series.isna() & (df_sorted["schedule_status"].isin(["ON_TRACK", "ON SCHEDULE"])),
+            0.0,
+            ext_series
+        )
+    df_sorted["_clean_ext"] = ext_series
 
     future_lookup = df_sorted[[
         "project_id", "report_month", "_clean_ext", "schedule_status"
@@ -129,16 +136,15 @@ def generate_time_targets(df: pd.DataFrame, horizon_months: int,
         suffixes=("", "_future")
     )
 
-    # Incremental delay in months
+    # Incremental delay in months (NaN if either future or current is missing)
     delta_delay_months = merged["_clean_ext_future"] - merged["_clean_ext"]
-    # Handle rows where future is missing
     delta_delay_months = np.where(
-        merged["_clean_ext_future"].isna(),
+        merged["_clean_ext_future"].isna() | merged["_clean_ext"].isna(),
         np.nan,
         delta_delay_months
     )
 
-    # Binary delay event: 1 if additional delay > threshold, 0 otherwise
+    # Binary delay event: 1 if additional delay > threshold, 0 otherwise, NaN if missing
     event_cls = np.where(
         np.isnan(delta_delay_months),
         np.nan,

@@ -1,0 +1,95 @@
+# PAIMANA Feature Engineering & Validation Configuration
+
+# Thresholds for Physical-Financial Relationship & Anomaly Flags
+thresholds:
+  # Gap between expenditure ratio (%) and physical progress (%) to flag mismatch
+  physical_financial_gap_threshold_pct: 15.0
+  
+  # High expenditure threshold (%)
+  high_expenditure_threshold_pct: 70.0
+  
+  # Low progress threshold (%)
+  low_progress_threshold_pct: 30.0
+  
+  # Stagnation threshold: progress change less than this percentage across 3 months
+  stagnation_progress_threshold_pct: 0.5
+  
+  # Cost overrun threshold to trigger warning
+  cost_overrun_warning_pct: 10.0
+
+# Trend Analysis Configuration
+trend_analysis:
+  # Minimum observations needed for linear trend slope calculation
+  min_observations_for_slope: 3
+  
+  # Months lookback for rolling velocities
+  velocity_3m_months: 3
+  velocity_6m_months: 6
+
+# Risk Signal Evaluation Rules
+risk_rules:
+  progress_deterioration: true
+  progress_stagnation: true
+  physical_financial_mismatch: true
+  high_expenditure_low_progress: true
+  increasing_cost_overrun: true
+  schedule_extended: true
+  schedule_overdue: true
+
+# Schema Columns (Exact 55 columns in exact specified sequence)
+schema_columns:
+  - project_id
+  - project_key
+  - project_name
+  - agency
+  - ministry_department
+  - sector
+  - state
+  - legacy_ocms_code
+  - pmgid
+  - report_month
+  - approval_start
+  - original_target_doc
+  - revised_doc
+  - project_age_months
+  - original_duration_months
+  - planned_remaining_months
+  - revised_remaining_months
+  - schedule_extension_months
+  - extension_rate_pct
+  - original_cost_crore
+  - revised_cost_crore
+  - cumulative_expenditure_crore
+  - cost_overrun_pct
+  - expenditure_ratio_pct
+  - cost_escalation_crore
+  - cost_escalation_ratio
+  - remaining_budget_crore
+  - expenditure_velocity_crore_month
+  - physical_progress_pct
+  - remaining_work_pct
+  - physical_progress_delta_1m
+  - physical_progress_delta_3m
+  - physical_progress_delta_6m
+  - progress_velocity_3m
+  - progress_velocity_6m
+  - progress_trend_slope
+  - physical_financial_gap_pct
+  - physical_to_expenditure_ratio
+  - progress_expenditure_mismatch_flag
+  - high_expenditure_low_progress_flag
+  - days_to_original_target
+  - days_to_revised_target
+  - schedule_status
+  - overdue_days
+  - extension_count
+  - cost_overrun_delta_1m
+  - cost_overrun_delta_3m
+  - cost_overrun_trend_slope
+  - expenditure_ratio_delta_1m
+  - expenditure_ratio_delta_3m
+  - schedule_extension_delta_1m
+  - risk_signal_count
+  - page
+  - source_report
+  - data_quality_flag

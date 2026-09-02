@@ -62,6 +62,7 @@ FEATURE_METADATA = {
     "is_overdue_flag": {"label": "Overdue Status Flag", "unit": "flag"},
     "is_extended_flag": {"label": "Extension Status Flag", "unit": "flag"},
     "cost_overrun_negative_flag": {"label": "Under-Budget Indicator", "unit": "flag"},
+    "remaining_budget_crore": {"label": "Remaining Budget", "unit": "₹ Cr"},
 }
 
 
@@ -201,6 +202,7 @@ def build_explanation_payload(
             "feature": d["feature"],
             "label": meta["display_name"],
             "actual_value": meta["actual_value"],
+            "raw_value": meta.get("raw_value"),
             "shap_contribution": d["shap_value"],
         })
 
@@ -211,6 +213,7 @@ def build_explanation_payload(
             "feature": d["feature"],
             "label": meta["display_name"],
             "actual_value": meta["actual_value"],
+            "raw_value": meta.get("raw_value"),
             "shap_contribution": d["shap_value"],
         })
 
@@ -497,6 +500,374 @@ def extract_financial_and_graph_trajectory(history: pd.DataFrame, latest_row: pd
     }
 
 
+def _int_to_word(val: float) -> str:
+    """Convert small integer numbers to capitalized words."""
+    words = {
+        1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five",
+        6: "Six", 7: "Seven", 8: "Eight", 9: "Nine", 10: "Ten",
+        11: "Eleven", 12: "Twelve"
+    }
+    try:
+        ival = int(round(val))
+        return words.get(ival, str(ival))
+    except Exception:
+        return str(val)
+
+
+def _clean_val_display(actual_val: Any) -> str:
+    """Sanitize display values for natural sentence insertion."""
+    if actual_val is None:
+        return ""
+    s = str(actual_val).strip()
+    if s in ["N/A", "Applies to Project", "Historical Category Baseline", "None"]:
+        return ""
+    return s
+
+
+def format_shap_explanation_sentence(
+    feature_col: str,
+    label: str,
+    actual_value: str,
+    raw_value: Any = None,
+    is_positive_driver: bool = True,
+    forecast_type: str = "Schedule Delay",
+    is_secondary: bool = False
+) -> str:
+    """
+    Dynamically generates a concise, professional, natural-language sentence connecting
+    feature value -> practical meaning -> whether it increases or reduces the predicted risk.
+    """
+    is_sched = "sched" in forecast_type.lower() or "time" in forecast_type.lower()
+    risk_name = "delay risk" if is_sched else "cost escalation risk"
+    val_disp = _clean_val_display(actual_value)
+
+    # Attempt numeric extraction
+    num_val = None
+    try:
+        if raw_value is not None and not pd.isna(raw_value):
+            num_val = float(raw_value)
+        elif val_disp:
+            parts = val_disp.split()
+            cleaned = parts[0].replace("₹", "").replace("%", "").replace("Cr", "").replace(",", "")
+            num_val = float(cleaned)
+    except Exception:
+        num_val = None
+
+    # 1. Handle Categorical features (Sector, Ministry, Agency, State, Status)
+    prefixes = [
+        ("sector_", "sector"),
+        ("ministry_department_", "ministry"),
+        ("agency_", "agency"),
+        ("state_", "state"),
+        ("schedule_status_", "status"),
+    ]
+    for pfx, cat_type in prefixes:
+        if feature_col.startswith(pfx):
+            cat_name = feature_col[len(pfx):].strip()
+            if cat_type == "sector":
+                if is_positive_driver:
+                    return f"Projects in the {cat_name} sector show a higher predicted {risk_name} contribution."
+                else:
+                    return f"Projects in the {cat_name} sector show a lower predicted {risk_name}."
+            elif cat_type == "ministry":
+                if is_positive_driver:
+                    return f"Projects under {cat_name} show a higher predicted {risk_name} contribution."
+                else:
+                    return f"Projects under {cat_name} show a lower predicted {risk_name}."
+            elif cat_type == "agency":
+                if is_positive_driver:
+                    return f"Historical project patterns for executing agency {cat_name} contribute to a higher predicted {risk_name}."
+                else:
+                    return f"Executing agency {cat_name} contributes toward a lower predicted {risk_name}."
+            elif cat_type == "state":
+                if is_positive_driver:
+                    return f"Projects located in {cat_name} show a higher predicted {risk_name} contribution."
+                else:
+                    return f"Projects located in {cat_name} show a lower predicted {risk_name}."
+            elif cat_type == "status":
+                if is_positive_driver:
+                    return f"The reported schedule status ({cat_name}) contributes toward a higher predicted {risk_name}."
+                else:
+                    return f"The reported schedule status ({cat_name}) contributes toward a lower predicted {risk_name}."
+
+    # 2. Specific Feature Sentence Builders
+    if feature_col in ["days_to_revised_target", "days_to_original_target"]:
+        target_name = "revised target date" if "revised" in feature_col else "original target date"
+        if is_positive_driver:
+            if num_val is not None and num_val < 0:
+                abs_days = int(abs(num_val))
+                return f"With the {target_name} passed {abs_days} days ago, the overdue schedule significantly increases the predicted delay risk."
+            elif val_disp:
+                return f"With only {val_disp} remaining until the {target_name}, the approaching deadline significantly increases the predicted delay risk."
+            return f"The approaching deadline for the {target_name} increases the predicted delay risk."
+        else:
+            if num_val is not None and num_val < 0:
+                return f"Operating past the initial {target_name} contributes toward a lower predicted delay risk."
+            elif val_disp:
+                return f"Having {val_disp} remaining until the {target_name} provides timeline buffer, helping reduce the predicted delay risk."
+            return f"The available timeline buffer until the {target_name} helps reduce the predicted delay risk."
+
+    if feature_col == "planned_remaining_months":
+        if is_positive_driver:
+            if num_val is not None and num_val < 0:
+                abs_val = abs(num_val)
+                mo_str = "1 month" if abs_val == 1 else (f"{int(abs_val)} months" if abs_val % 1 == 0 else f"{abs_val:.1f} months")
+                return f"Being {mo_str} past the planned duration contributes toward higher predicted delay risk."
+            elif val_disp:
+                return f"With {val_disp} of planned duration remaining, this feature contributes toward higher predicted {risk_name}."
+            return f"Compressed planned remaining duration contributes toward higher predicted {risk_name}."
+        else:
+            if num_val is not None and num_val < 0:
+                return f"The historical duration baseline contributes toward a lower predicted {risk_name}."
+            elif val_disp:
+                return f"With {val_disp} of planned duration remaining, this feature contributes toward a lower predicted {risk_name}."
+            return f"Adequate remaining duration helps reduce the predicted {risk_name}."
+
+    if feature_col == "revised_remaining_months":
+        if is_positive_driver:
+            if num_val is not None and num_val < 0:
+                abs_val = abs(num_val)
+                mo_str = "1 month" if abs_val == 1 else (f"{int(abs_val)} months" if abs_val % 1 == 0 else f"{abs_val:.1f} months")
+                return f"Being {mo_str} past the revised target duration contributes toward higher predicted delay risk."
+            elif val_disp:
+                return f"With {val_disp} of revised duration remaining, this feature contributes toward higher predicted {risk_name}."
+            return f"Compressed revised remaining duration contributes toward higher predicted {risk_name}."
+        else:
+            if num_val is not None and num_val < 0:
+                return f"The revised duration baseline contributes toward a lower predicted {risk_name}."
+            elif val_disp:
+                return f"With {val_disp} of revised duration remaining, this feature contributes toward a lower predicted {risk_name}."
+            return f"Adequate remaining duration helps reduce the predicted {risk_name}."
+
+    if feature_col == "original_duration_months":
+        if is_positive_driver:
+            if val_disp:
+                return f"An original planned duration of {val_disp} indicates substantial project scale, contributing to higher predicted {risk_name}."
+            return f"Project duration scale contributes to higher predicted {risk_name}."
+        else:
+            if val_disp:
+                return f"An original planned duration of {val_disp} provides sufficient scheduling allowance, helping reduce the predicted {risk_name}."
+            return f"The original planned project duration helps reduce the predicted {risk_name}."
+
+    if feature_col == "project_age_months":
+        if is_positive_driver:
+            if val_disp:
+                return f"A project age of {val_disp} since approval reflects an extended lifecycle, contributing to higher predicted {risk_name}."
+            return f"An extended project lifecycle contributes to higher predicted {risk_name}."
+        else:
+            if val_disp:
+                return f"A project age of {val_disp} reflects an early execution phase, helping reduce the predicted {risk_name}."
+            return f"Early lifecycle stage helps reduce the predicted {risk_name}."
+
+    if feature_col == "extension_count":
+        if is_positive_driver:
+            if num_val is not None and num_val > 0:
+                word_num = _int_to_word(num_val)
+                rev_label = "schedule revision" if num_val == 1 else "schedule revisions"
+                return f"{word_num} {rev_label} indicate repeated changes to the project timeline, increasing the predicted {risk_name}."
+            elif val_disp:
+                return f"{val_disp} indicate changes to the project timeline, increasing the predicted {risk_name}."
+            return f"Prior schedule revisions indicate changes to the project timeline, increasing the predicted {risk_name}."
+        else:
+            if val_disp:
+                return f"A stable timeline with minimal revisions ({val_disp}) helps reduce the predicted {risk_name}."
+            return f"A lack of frequent schedule revisions helps reduce the predicted {risk_name}."
+
+    if feature_col == "schedule_extension_months":
+        if is_positive_driver:
+            if val_disp:
+                return f"Existing schedule extension of {val_disp} indicates historical timeline delays, increasing the predicted delay risk."
+            return "Accumulated schedule extensions increase the predicted delay risk."
+        else:
+            if val_disp:
+                return f"A limited schedule extension of {val_disp} contributes toward a lower predicted delay risk."
+            return "Minimal schedule extension helps reduce the predicted delay risk."
+
+    if feature_col == "overdue_days":
+        if is_positive_driver:
+            if val_disp:
+                return f"Being overdue by {val_disp} indicates direct timeline slippage, increasing the predicted delay risk."
+            return "Overdue operational status increases the predicted delay risk."
+        else:
+            if val_disp:
+                return f"Operating with {val_disp} overdue duration contributes toward a lower predicted delay risk."
+            return "Adherence to milestone deadlines helps reduce the predicted delay risk."
+
+    if feature_col == "consecutive_stagnant_months":
+        if is_positive_driver:
+            if num_val is not None and num_val > 0:
+                word_num = _int_to_word(num_val)
+                mo_label = "stagnant month" if num_val == 1 else "consecutive stagnant months"
+                if is_sched:
+                    return f"{word_num} {mo_label} indicate stalled physical execution, increasing the predicted delay risk."
+                else:
+                    return f"{word_num} {mo_label} with ongoing project overhead increase the predicted cost escalation risk."
+            elif val_disp:
+                return f"{val_disp} of consecutive stagnation contribute to higher predicted {risk_name}."
+            return f"Consecutive months of stagnant progress increase the predicted {risk_name}."
+        else:
+            if num_val is not None:
+                word_num = _int_to_word(num_val)
+                mo_label = "stagnant month" if num_val == 1 else "consecutive stagnant months"
+                return f"{word_num} {mo_label} have a lower contribution to the predicted {risk_name}."
+            elif val_disp:
+                return f"{val_disp} of stagnant progress have a lower contribution to the predicted {risk_name}."
+            return f"Low stagnation levels help reduce the predicted {risk_name}."
+
+    if feature_col in ["stagnation_flag", "is_overdue_flag", "is_extended_flag"]:
+        flag_type = "stagnation in execution" if "stagnation" in feature_col else ("overdue status" if "overdue" in feature_col else "prior timeline extension")
+        if is_positive_driver:
+            return f"Recent {flag_type} increases the predicted {risk_name}."
+        else:
+            return f"Absence of recent {flag_type} helps reduce the predicted {risk_name}."
+
+    if feature_col == "risk_signal_count":
+        if is_positive_driver:
+            if val_disp:
+                return f"A risk signal count of {val_disp} indicates operational vulnerabilities, increasing the predicted {risk_name}."
+            return f"Identified risk signals contribute to a higher predicted {risk_name}."
+        else:
+            if val_disp:
+                return f"A low risk signal count ({val_disp}) contributes toward a lower predicted {risk_name}."
+            return f"A low count of risk signals helps reduce the predicted {risk_name}."
+
+    if feature_col == "physical_progress_pct":
+        if is_positive_driver:
+            if val_disp:
+                return f"Physical progress at {val_disp} indicates lagging milestone achievement, increasing the predicted {risk_name}."
+            return f"Current physical progress level contributes to higher predicted {risk_name}."
+        else:
+            if val_disp:
+                return f"Achieved physical progress of {val_disp} relative to expenditure helps reduce the predicted {risk_name}."
+            return f"Strong physical progress helps reduce the predicted {risk_name}."
+
+    if feature_col == "remaining_work_pct":
+        if is_positive_driver:
+            if val_disp:
+                return f"With {val_disp} of physical work remaining, the substantial remaining scope increases the predicted {risk_name}."
+            return f"Substantial remaining work increases the predicted {risk_name}."
+        else:
+            if val_disp:
+                return f"With only {val_disp} of physical work remaining, the near-completion status helps reduce the predicted {risk_name}."
+            return f"Low remaining physical work helps reduce the predicted {risk_name}."
+
+    if feature_col == "expenditure_velocity_crore_month":
+        if is_positive_driver:
+            if val_disp:
+                return f"The current expenditure velocity of {val_disp} contributes to a higher predicted cost escalation risk."
+            return "Rapid expenditure velocity increases the predicted cost escalation risk."
+        else:
+            if val_disp:
+                return f"A controlled expenditure velocity of {val_disp} helps reduce the predicted cost escalation risk."
+            return "Moderate expenditure velocity helps reduce the predicted cost escalation risk."
+
+    if feature_col in ["progress_velocity_3m", "progress_trend_slope", "physical_progress_delta_1m", "physical_progress_delta_3m"]:
+        if is_positive_driver:
+            if val_disp:
+                return f"A progress velocity of {val_disp} contributes toward higher predicted delay risk."
+            return "Slower progress velocity increases the predicted delay risk."
+        else:
+            if val_disp:
+                return f"A progress velocity of {val_disp} contributes toward a lower predicted delay risk."
+            return "Consistent progress velocity helps reduce the predicted delay risk."
+
+    if feature_col in ["cost_overrun_pct", "cost_escalation_crore"]:
+        if is_positive_driver:
+            if val_disp:
+                return f"An existing cost overrun of {val_disp} increases the predicted cost escalation risk."
+            return "Existing cost overruns contribute to a higher predicted cost escalation risk."
+        else:
+            if val_disp:
+                return f"A low cost overrun level ({val_disp}) contributes to a lower predicted cost escalation risk."
+            return "Absence of major historical cost overrun helps reduce the predicted cost escalation risk."
+
+    if feature_col in ["cost_overrun_trend_slope", "cost_overrun_delta_1m", "cost_overrun_delta_3m"]:
+        if is_positive_driver:
+            if val_disp:
+                return f"A recent upward trend in cost overrun ({val_disp}) contributes to a higher predicted cost escalation risk."
+            return "An increasing cost overrun trend contributes to higher predicted cost escalation risk."
+        else:
+            if val_disp:
+                return f"A moderate cost overrun change ({val_disp}) contributes to a lower predicted cost escalation risk."
+            return "Stable cost trends help reduce the predicted cost escalation risk."
+
+    if feature_col in ["expenditure_ratio_pct", "progress_minus_expenditure_gap", "expenditure_minus_progress_gap"]:
+        if is_positive_driver:
+            if val_disp:
+                return f"The current ratio of {val_disp} indicates relatively high expenditure compared with physical progress, increasing the predicted cost escalation risk."
+            return "Disproportionate expenditure relative to physical progress increases the predicted cost escalation risk."
+        else:
+            if val_disp:
+                return f"The current expenditure-to-progress ratio ({val_disp}) helps reduce the predicted cost escalation risk."
+            return "The current expenditure-to-progress ratio helps reduce the predicted cost escalation risk."
+
+    if feature_col == "revised_cost_crore":
+        if is_positive_driver:
+            if val_disp:
+                return f"The current revised cost of {val_disp} contributes to higher predicted {risk_name}."
+            return f"The revised cost scale contributes toward higher predicted {risk_name}."
+        else:
+            if val_disp:
+                return f"The current revised cost of {val_disp} contributes toward a lower predicted {risk_name}."
+            return f"The revised cost scale helps reduce the predicted {risk_name}."
+
+    if feature_col == "cumulative_expenditure_crore":
+        if is_positive_driver:
+            if val_disp:
+                return f"Cumulative expenditure of {val_disp} contributes to higher predicted {risk_name}."
+            return f"Cumulative expenditure contributes toward higher predicted {risk_name}."
+        else:
+            if val_disp:
+                return f"Cumulative expenditure of {val_disp} contributes toward a lower predicted {risk_name}."
+            return f"Cumulative expenditure contributes toward a lower predicted {risk_name}."
+
+    if feature_col == "remaining_budget_crore":
+        if is_positive_driver:
+            if val_disp:
+                return f"The remaining budget of {val_disp} contributes toward higher predicted {risk_name}."
+            return f"The remaining budget contributes toward higher predicted {risk_name}."
+        else:
+            if val_disp:
+                return f"The remaining budget of {val_disp} helps reduce the predicted {risk_name}."
+            return f"The remaining budget provides financial capacity that helps reduce the predicted {risk_name}."
+
+    if feature_col == "original_cost_crore":
+        if is_positive_driver:
+            if val_disp:
+                return f"The original approved cost of {val_disp} contributes to higher predicted {risk_name}."
+            return f"The original approved cost contributes toward higher predicted {risk_name}."
+        else:
+            if val_disp:
+                return f"The original approved cost of {val_disp} contributes toward a lower predicted {risk_name}."
+            return f"The original approved cost helps reduce the predicted {risk_name}."
+
+    if feature_col == "extension_rate_pct":
+        if is_positive_driver:
+            if val_disp:
+                return f"A schedule extension rate of {val_disp} relative to duration increases the predicted delay risk."
+            return "Elevated schedule extension rate increases the predicted delay risk."
+        else:
+            if val_disp:
+                return f"A low schedule extension rate ({val_disp}) helps reduce the predicted delay risk."
+            return "Controlled schedule extension rate helps reduce the predicted delay risk."
+
+    if feature_col == "cost_overrun_negative_flag":
+        if is_positive_driver:
+            return "Budget adjustments contribute to the predicted cost escalation risk."
+        else:
+            return "Operating under the sanctioned budget helps reduce the predicted cost escalation risk."
+
+    # 3. Generic Fallback for any unhandled feature column
+    if is_positive_driver:
+        if val_disp:
+            return f"The current {label.lower()} ({val_disp}) contributes to higher predicted {risk_name}."
+        return f"{label} contributes to higher predicted {risk_name}."
+    else:
+        if val_disp:
+            return f"The current {label.lower()} ({val_disp}) helps reduce the predicted {risk_name}."
+        return f"{label} helps reduce the predicted {risk_name}."
+
+
 class QwenExplainer:
     """
     Service client for Qwen3-8B Natural Language Explanations and Interactive Q&A.
@@ -545,19 +916,21 @@ class QwenExplainer:
 
         system_prompt = (
             "You are the senior infrastructure AI analyst for Nirmaan Dristi (Central Sector Infrastructure Monitoring).\n"
-            "Your task is to convert verified Machine Learning predictions and SHAP feature attributions into a concise, professional explanation.\n\n"
-            "STRICT RULES:\n"
-            "1. NEVER invent reasons, causes, contractor names, or historical trends not in the supplied JSON.\n"
-            "2. NEVER recalculate or alter the predicted probabilities, delay months, or cost figures.\n"
-            "3. If the project has limited historical data (is_limited_history=true), explicitly state that the evaluation is based on limited available reporting history.\n"
-            "4. Use the actual project values where useful to provide clear context for decision-makers.\n"
-            "5. Return ONLY a valid JSON object matching the exact schema below.\n\n"
+            "Your task is to convert verified Machine Learning predictions and SHAP feature attributions into concise, professional, natural-language explanations easy for non-technical project officials to understand.\n\n"
+            "STRICT WRITING GUIDELINES:\n"
+            "1. Clearly connect: Current feature value -> Its practical meaning -> Whether it increases or reduces the predicted risk.\n"
+            "2. NEVER use robotic, awkward, or academic phrases such as 'actively acts as a protective buffer', 'provides secondary pressure toward delay/escalation', 'strongly elevates the model\\'s predicted risk score', or raw SHAP numbers (+1.25 impact).\n"
+            "3. PREFER natural phrasing such as 'increases the predicted risk', 'reduces the predicted risk', 'contributes to higher/lower risk', 'indicates schedule pressure', 'provides financial capacity'.\n"
+            "4. NEVER invent reasons, contractor names, or historical trends not in the supplied JSON.\n"
+            "5. NEVER recalculate or alter the predicted probabilities, delay months, or cost figures.\n"
+            "6. If the project has limited historical data (is_limited_history=true), explicitly state that the evaluation is based on limited available reporting history.\n"
+            "7. Return ONLY a valid JSON object matching the exact schema below.\n\n"
             "REQUIRED JSON SCHEMA:\n"
             "{\n"
             '  "summary": "One concise sentence summarizing the prediction result and main driver.",\n'
-            '  "primary_reasons": ["Point 1 citing top risk driver with real project value", "Point 2 citing second driver with real value"],\n'
+            '  "primary_reasons": ["Point 1 connecting top risk driver with real value to why it increases risk", "Point 2 connecting second driver to risk"],\n'
             '  "supporting_factors": ["Secondary contributing factor 1", "Secondary contributing factor 2"],\n'
-            '  "risk_reducing_factors": ["Protective factor 1 mitigating the risk", "Protective factor 2"]\n'
+            '  "risk_reducing_factors": ["Protective factor 1 connecting real value to why it reduces risk", "Protective factor 2"]\n'
             "}"
         )
 
@@ -602,7 +975,7 @@ class QwenExplainer:
     def generate_fallback_explanation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Generate a deterministic, fact-grounded explanation directly from SHAP drivers & metrics.
-        Guarantees zero hallucination and 100% availability.
+        Guarantees zero hallucination and 100% availability with natural, professional wording.
         """
         pname = payload.get("project_name", "This project")
         f_type = payload.get("forecast_type", "Schedule Delay")
@@ -620,13 +993,14 @@ class QwenExplainer:
         lead_driver = pos_drivers[0]["label"] if pos_drivers else "current project trajectory"
         lead_val = pos_drivers[0]["actual_value"] if pos_drivers and pos_drivers[0]["actual_value"] != "N/A" else ""
         lead_clause = f" primarily driven by {lead_driver} ({lead_val})" if lead_val and lead_val != "Applies to Project" else f" primarily driven by {lead_driver}"
+        horizon_clean = "3 months" if "3" in str(horizon) else ("6 months" if "6" in str(horizon) else str(horizon).lower())
 
         if risk_level == "HIGH RISK":
-            summary = f"{pname} is assessed at {risk_level} ({prob_pct}% probability) for additional {f_type.lower()} over the next {horizon.lower()},{lead_clause}."
+            summary = f"{pname} is assessed at {risk_level} ({prob_pct}% probability) for additional {f_type.lower()} over the next {horizon_clean},{lead_clause}."
         elif risk_level == "LOW RISK":
-            summary = f"{pname} exhibits a {risk_level} ({prob_pct}% probability) of additional {f_type.lower()} in the next {horizon.lower()}, supported by stable reported trajectory."
+            summary = f"{pname} exhibits a {risk_level} ({prob_pct}% probability) of additional {f_type.lower()} in the next {horizon_clean}, supported by stable reported trajectory."
         else:
-            summary = f"{pname} carries a {risk_level} ({prob_pct}% probability) of additional {f_type.lower()} ({pred_delta}) over the next {horizon.lower()}."
+            summary = f"{pname} carries a {risk_level} ({prob_pct}% probability) of additional {f_type.lower()} ({pred_delta}) over the next {horizon_clean}."
 
         if is_limited:
             summary += " (Note: Assessment is based on limited available reporting snapshots)."
@@ -634,8 +1008,16 @@ class QwenExplainer:
         # Build Primary Reasons
         primary_reasons = []
         for d in pos_drivers[:3]:
-            val_str = f" (current: {d['actual_value']})" if d['actual_value'] not in ["N/A", "Applies to Project", "Historical Category Baseline"] else ""
-            primary_reasons.append(f"{d['label']}{val_str} strongly elevates the model's predicted risk score (+{d['shap_contribution']:.2f} SHAP impact).")
+            sent = format_shap_explanation_sentence(
+                feature_col=d["feature"],
+                label=d["label"],
+                actual_value=d["actual_value"],
+                raw_value=d.get("raw_value"),
+                is_positive_driver=True,
+                forecast_type=f_type,
+                is_secondary=False
+            )
+            primary_reasons.append(sent)
 
         if not primary_reasons:
             primary_reasons.append(f"Model baseline expectations for {payload.get('sector', 'this sector')} infrastructure projects.")
@@ -643,17 +1025,33 @@ class QwenExplainer:
         # Build Supporting Factors
         supporting_factors = []
         for d in pos_drivers[3:5]:
-            val_str = f" (recorded value: {d['actual_value']})" if d['actual_value'] not in ["N/A", "Applies to Project", "Historical Category Baseline"] else ""
-            supporting_factors.append(f"{d['label']}{val_str} provides secondary pressure toward delay/escalation.")
+            sent = format_shap_explanation_sentence(
+                feature_col=d["feature"],
+                label=d["label"],
+                actual_value=d["actual_value"],
+                raw_value=d.get("raw_value"),
+                is_positive_driver=True,
+                forecast_type=f_type,
+                is_secondary=True
+            )
+            supporting_factors.append(sent)
 
         if curr_metrics.get("physical_progress_pct") and curr_metrics.get("physical_progress_pct") != "N/A%":
-            supporting_factors.append(f"Recorded physical progress is currently {curr_metrics['physical_progress_pct']} against reported project duration.")
+            supporting_factors.append(f"The project has achieved {curr_metrics['physical_progress_pct']} physical progress relative to its reported duration.")
 
         # Build Risk Reducing Factors
         risk_reducing_factors = []
         for d in neg_drivers[:3]:
-            val_str = f" ({d['actual_value']})" if d['actual_value'] not in ["N/A", "Applies to Project", "Historical Category Baseline"] else ""
-            risk_reducing_factors.append(f"{d['label']}{val_str} actively acts as a protective buffer, lowering the predicted risk ({d['shap_contribution']:.2f} SHAP impact).")
+            sent = format_shap_explanation_sentence(
+                feature_col=d["feature"],
+                label=d["label"],
+                actual_value=d["actual_value"],
+                raw_value=d.get("raw_value"),
+                is_positive_driver=False,
+                forecast_type=f_type,
+                is_secondary=False
+            )
+            risk_reducing_factors.append(sent)
 
         if not risk_reducing_factors:
             risk_reducing_factors.append("No major protective factors detected in the current snapshot.")
@@ -756,18 +1154,34 @@ class QwenExplainer:
 
         pname = meta.get("project_name", "This project")
 
-        if "biggest factor" in q_lower or "main driver" in q_lower or "top factor" in q_lower:
+        if any(k in q_lower for k in ["biggest", "main driver", "top factor", "key driver", "primary reason", "risk factor", "top driver", "main reason"]):
             drivers = sched_3m.get("top_risk_drivers", [])
             if drivers:
                 top = drivers[0]
-                return f"**Biggest Risk Driver for {pname}:**\n\nThe primary factor driving the prediction is **{top['label']}** ({top['actual_value']}), contributing **+{top['shap_contribution']:.2f}** to the model's risk score."
+                feat_name = top.get("feature", "unknown_feature")
+                label_name = top.get("label") or top.get("display_name") or FEATURE_METADATA.get(feat_name, {}).get("display_name", feat_name)
+                act_val = top.get("actual_value", "N/A")
+                sent = format_shap_explanation_sentence(
+                    feat_name,
+                    label_name,
+                    act_val,
+                    top.get("raw_value"),
+                    is_positive_driver=True,
+                    forecast_type="Schedule Delay"
+                )
+                return f"**Biggest Risk Driver for {pname}:**\n\n{sent}"
             return f"The model is relying on baseline sectoral metrics for {meta.get('sector', 'this sector')}."
 
         elif "reducing" in q_lower or "protective" in q_lower or "mitigat" in q_lower:
-            prot = sched_3m.get("protective_factors", [])
+            prot = sched_3m.get("protective_factors", []) or sched_3m.get("top_protective_factors", [])
             if prot:
-                items = "\n".join([f"- **{p['label']}** ({p['actual_value']}): reduces risk score by **{p['shap_contribution']:.2f}**" for p in prot[:3]])
-                return f"**Factors Reducing Risk for {pname}:**\n\n{items}"
+                items = []
+                for p in prot[:3]:
+                    feat_name = p.get("feature", "unknown_feature")
+                    label_name = p.get("label") or p.get("display_name") or FEATURE_METADATA.get(feat_name, {}).get("display_name", feat_name)
+                    act_val = p.get("actual_value", "N/A")
+                    items.append(f"- {format_shap_explanation_sentence(feat_name, label_name, act_val, p.get('raw_value'), is_positive_driver=False, forecast_type='Schedule Delay')}")
+                return f"**Factors Reducing Risk for {pname}:**\n\n" + "\n".join(items)
             return f"No strong protective factors were identified for {pname} in the latest snapshot."
 
         elif "cost" in q_lower:
@@ -1155,8 +1569,8 @@ class QwenExplainer:
             rem_pct = round(100.0 - curr_progress, 2)
             summary = (
                 f"{curr_state_brief} {history_brief} {fin_journey_brief} "
-                f"With only {rem_pct}% of physical work remaining, current completion is targeted for {effective_doc} ({ext_mo:.1f} months cumulative extension). "
-                f"Executive attention shifts towards statutory clearances, integrated testing, punch-list closure, and administrative asset handover."
+                f"With only {rem_pct}% of physical work remaining, current completion is targeted for {effective_doc} ({ext_mo:.1f} months cumulative extension), "
+                f"focusing executive attention on final milestone delivery and project closure."
             )
             alerts = [
                 {
@@ -1167,7 +1581,7 @@ class QwenExplainer:
                 {
                     "issue": "Commissioning & Asset Handover",
                     "evidence": f"Project stands at {curr_progress:.1f}% physical progress after {ext_mo:.1f} months of extension.",
-                    "why_it_matters": "Focus shifts to statutory testing, safety clearances, and administrative handover."
+                    "why_it_matters": "Final-stage milestones must be completed to finalize project delivery."
                 }
             ]
             if rem_against_rev and rem_against_rev > 0:
@@ -1190,7 +1604,7 @@ class QwenExplainer:
             summary = (
                 f"The {pname} is an approved {sector} infrastructure project under {ministry} with an allotted cost of ₹{orig_c:,.2f} crore and scheduled completion by {orig_doc}. "
                 f"This is a new project with 0% physical execution progress, so there is currently insufficient execution history for a reliable assessment of long-term project performance. "
-                f"Initial focus remains on statutory clearances, land acquisition, site handover, and contractor mobilization."
+                f"Initial focus remains on baseline setup, initial allocations, and commencing execution activities."
             )
             alerts = [
                 {
@@ -1212,13 +1626,13 @@ class QwenExplainer:
             summary = (
                 f"The {pname} under {ministry} has recently commenced physical execution, standing at {curr_progress:.2f}% progress against an allotted cost of ₹{orig_c:,.2f} crore. "
                 f"{fin_journey_brief} Scheduled completion is targeted for {orig_doc}. "
-                f"Only limited conclusions can be drawn regarding long-term project performance at this inception stage, as ground execution and site mobilization are actively ramping up."
+                f"Only limited conclusions can be drawn regarding long-term project performance at this inception stage given the limited initial physical execution history."
             )
             alerts = [
                 {
                     "issue": "Early Inception Progress",
                     "evidence": f"Physical progress stands at {curr_progress:.2f}% with ₹{curr_exp:,.2f} Cr initial expenditure.",
-                    "why_it_matters": "Site mobilization and ground execution are in preliminary setup phase."
+                    "why_it_matters": "Initial physical progress is in its earliest recorded phase."
                 },
                 {
                     "issue": "Execution History Limitation",

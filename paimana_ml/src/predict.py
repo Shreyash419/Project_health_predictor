@@ -82,9 +82,10 @@ def predict_cost(features_df: pd.DataFrame, models: Dict,
     if horizons is None:
         horizons = [3, 6]
 
-    curr_cost_ov_pct = current_status.get("cost_overrun_pct") or 0.0
-    curr_cost_ov_cr = current_status.get("cost_escalation_crore") or 0.0
-    orig_cost_cr = current_status.get("original_cost_crore") or 0.0
+    curr_cost_ov_pct = current_status.get("cost_overrun_pct")
+    curr_cost_ov_cr = current_status.get("cost_escalation_crore")
+    orig_cost_cr = current_status.get("original_cost_crore")
+    rev_cost_cr = current_status.get("revised_cost_crore")
 
     results = {}
 
@@ -107,16 +108,32 @@ def predict_cost(features_df: pd.DataFrame, models: Dict,
         if reg_key in models and prep_key in models:
             X = models[prep_key].transform(features_df)
             pred_delta_pct = float(models[reg_key].predict(X)[0])
-            
-            pred_delta_cr = float(orig_cost_cr * (pred_delta_pct / 100.0))
-
             h_result["predicted_additional_overrun_pct"] = round(pred_delta_pct, 2)
-            h_result["predicted_additional_cost_crore"] = round(pred_delta_cr, 2)
 
-            # Mathematically consistent final totals
-            h_result["predicted_final_cost_overrun_pct"] = round(curr_cost_ov_pct + pred_delta_pct, 2)
-            h_result["predicted_final_cost_escalation_crore"] = round(curr_cost_ov_cr + pred_delta_cr, 2)
-            h_result["predicted_final_revised_cost_crore"] = round(orig_cost_cr + (curr_cost_ov_cr + pred_delta_cr), 2)
+            if orig_cost_cr is not None:
+                pred_delta_cr = float(orig_cost_cr * (pred_delta_pct / 100.0))
+                h_result["predicted_additional_cost_crore"] = round(pred_delta_cr, 2)
+            else:
+                pred_delta_cr = None
+                h_result["predicted_additional_cost_crore"] = None
+
+            # Mathematically consistent final totals without fabricating zeros
+            if curr_cost_ov_pct is not None:
+                h_result["predicted_final_cost_overrun_pct"] = round(curr_cost_ov_pct + pred_delta_pct, 2)
+            else:
+                h_result["predicted_final_cost_overrun_pct"] = None
+
+            if curr_cost_ov_cr is not None and pred_delta_cr is not None:
+                h_result["predicted_final_cost_escalation_crore"] = round(curr_cost_ov_cr + pred_delta_cr, 2)
+            else:
+                h_result["predicted_final_cost_escalation_crore"] = None
+
+            if orig_cost_cr is not None and curr_cost_ov_cr is not None and pred_delta_cr is not None:
+                h_result["predicted_final_revised_cost_crore"] = round(orig_cost_cr + (curr_cost_ov_cr + pred_delta_cr), 2)
+            elif rev_cost_cr is not None and pred_delta_cr is not None:
+                h_result["predicted_final_revised_cost_crore"] = round(rev_cost_cr + pred_delta_cr, 2)
+            else:
+                h_result["predicted_final_revised_cost_crore"] = None
         else:
             h_result["predicted_additional_overrun_pct"] = None
             h_result["predicted_additional_cost_crore"] = None
@@ -154,7 +171,9 @@ def predict_time(features_df: pd.DataFrame, models: Dict,
     if horizons is None:
         horizons = [3, 6]
 
-    curr_extension = current_status.get("schedule_extension_months") or 0.0
+    curr_extension = current_status.get("schedule_extension_months")
+    if curr_extension is None and current_status.get("schedule_status") in ["ON_TRACK", "ON SCHEDULE"]:
+        curr_extension = 0.0
 
     results = {}
 
@@ -177,9 +196,12 @@ def predict_time(features_df: pd.DataFrame, models: Dict,
         if reg_key in models and prep_key in models:
             X = models[prep_key].transform(features_df)
             pred_delta_months = float(models[reg_key].predict(X)[0])
-            
             h_result["predicted_additional_delay_months"] = round(pred_delta_months, 2)
-            h_result["predicted_total_schedule_extension_months"] = round(curr_extension + pred_delta_months, 2)
+            
+            if curr_extension is not None:
+                h_result["predicted_total_schedule_extension_months"] = round(curr_extension + pred_delta_months, 2)
+            else:
+                h_result["predicted_total_schedule_extension_months"] = None
         else:
             h_result["predicted_additional_delay_months"] = None
             h_result["predicted_total_schedule_extension_months"] = None
