@@ -204,6 +204,26 @@ def test_identifier_separation_required_cases():
     assert code == "612786"
     assert pmg == "10000"
 
+    # Single-line inline (Agency) (Project Code)
+    c6 = "Construction of new 4 lane major bridge on Sabarmati River (MoRTH) (617926)"
+    name, ag, code, ocms, pmg = parser.parse_project_cell(c6)
+    assert name == "Construction of new 4 lane major bridge on Sabarmati River"
+    assert ag == "MoRTH"
+    assert code == "617926"
+
+    # Nested parentheses in Agency name
+    c7 = "DHULE [BORVIHIR] - NARDANA NEW LINE [50.60 KMS] (Central Railway (CR) - II)"
+    name, ag, code, ocms, pmg = parser.parse_project_cell(c7)
+    assert name == "DHULE [BORVIHIR] - NARDANA NEW LINE [50.60 KMS]"
+    assert ag == "Central Railway (CR) - II"
+
+    # Agency with square brackets and project code
+    c8 = "4 Laning with PS of Pathrapalli-Katghora (National Highways Authority of India [NHAI]) (619167)"
+    name, ag, code, ocms, pmg = parser.parse_project_cell(c8)
+    assert name == "4 Laning with PS of Pathrapalli-Katghora"
+    assert ag == "National Highways Authority of India [NHAI]"
+    assert code == "619167"
+
 
 def test_single_report_and_table4_only(test_env):
     """

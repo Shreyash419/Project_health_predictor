@@ -167,9 +167,16 @@ class MasterManager:
                 record_map[key] = new_rec
                 added_count += 1
 
-        # Combine all records and sort by project_id and report_month
+        # Combine all records and sort in ascending order by project_id and report_month
+        def record_sort_key(r: Dict[str, Any]) -> Tuple[int, Any, str]:
+            pid = str(r.get("project_id", "")).strip()
+            r_mo = str(r.get("report_month", "")).strip()
+            if pid.isdigit():
+                return (0, int(pid), r_mo)
+            return (1, pid, r_mo)
+
         all_records = list(record_map.values())
-        all_records.sort(key=lambda r: (str(r.get("project_id", "")), str(r.get("report_month", ""))))
+        all_records.sort(key=record_sort_key)
 
         self._save_to_excel(all_records)
         logger.info(f"Master file saved: {len(all_records)} total rows (+{added_count} added, {skipped_count} duplicates skipped, {reprocessed_count} reprocessed).")

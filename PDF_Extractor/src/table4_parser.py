@@ -58,6 +58,27 @@ def parse_date_mmyyyy(date_str: Any) -> Optional[str]:
     return None
 
 
+def pop_trailing_paren(s: str) -> Tuple[str, Optional[str]]:
+    """
+    Pops the outermost balanced trailing parenthesized expression from s, if one exists.
+    Returns (remaining_string, popped_token_content).
+    """
+    s = s.strip()
+    if not s.endswith(')'):
+        return s, None
+    depth = 0
+    for i in range(len(s) - 1, -1, -1):
+        if s[i] == ')':
+            depth += 1
+        elif s[i] == '(':
+            depth -= 1
+            if depth == 0:
+                token = s[i+1:-1].strip()
+                remainder = s[:i].strip()
+                return remainder, token
+    return s, None
+
+
 class Table4Parser:
     """Parses Table 4 pages from PDF extractor and outputs raw project records."""
 
@@ -66,13 +87,14 @@ class Table4Parser:
 
     def parse_project_cell(self, cell_text: str) -> Tuple[str, Optional[str], Optional[str], Optional[str], Optional[str]]:
         """
-        Parse the multi-line Project Name cell into:
+        Parse the multi-line or inline Project Name cell into:
         (project_name, agency, project_code, legacy_ocms_code, pmgid)
+        Handles trailing (Agency), (Project Code), (OCMS) (PMGID) even when nested or concatenated.
         """
         if not cell_text:
             return "", None, None, None, None
             
-        lines = [line.strip() for line in cell_text.split('\n') if line.strip()]
+        lines = [line.strip() for line in str(cell_text).split('\n') if line.strip()]
         if not lines:
             return "", None, None, None, None
 
@@ -90,47 +112,77 @@ class Table4Parser:
             m_dual = re.match(r'^\(([^)]*)\)\s+\(([^)]*)\)$', line)
             if m_dual:
                 c1, c2 = m_dual.group(1).strip(), m_dual.group(2).strip()
-                legacy_ocms = c1 if c1 and c1 not in ['-', '—', '–', 'none', 'null'] else None
-                pmgid = c2 if c2 and c2 not in ['-', '—', '–', 'none', 'null'] else None
+                legacy_ocms = c1 if c1 and c1 not in ['-', '—', '–', 'none', 'null', '(-)','NaN'] else None
+                pmgid = c2 if c2 and c2 not in ['-', '—', '–', 'none', 'null', '(-)','NaN'] else None
                 idx -= 1
             else:
-                # Check if PMGID or OCMS is alone on last line
-                m_single_ocms = re.match(r'^\((N\d{7,9}|[A-Z]\d{7,9})\)$', line)
-                m_single_pmg = re.match(r'^\((\d{1,5})\)$', line)
+                m_single_ocms = re.match(r'^\((N\d{7,9}|[A-Z]\d{7,9}|\d{8,9})\)$', line)
                 m_dash_dual = re.match(r'^\([-—–]\)\s*\([-—–]\)$', line)
                 if m_single_ocms:
                     legacy_ocms = m_single_ocms.group(1).strip()
                     idx -= 1
-                elif m_single_pmg:
-                    pmgid = m_single_pmg.group(1).strip()
-                    idx -= 1
                 elif m_dash_dual:
                     idx -= 1
 
-        # 2. Check for Project Code: e.g. '(617830)' or '(400160)'
+        # 2. Check for standalone Project Code on current line: e.g. '(617830)' or '617830'
         if idx >= 0:
             line = lines[idx]
             m_code = re.match(r'^\((\d{4,7})\)$', line)
+            m_code2 = re.match(r'^(\d{5,7})$', line)
             if m_code:
                 project_code = m_code.group(1)
                 idx -= 1
-            else:
-                m_code2 = re.match(r'^(\d{5,7})$', line)
-                if m_code2:
-                    project_code = m_code2.group(1)
-                    idx -= 1
-
-        # 3. Check for Agency: e.g. '(Ministry of Coal)' or '(Western Coalfields Limited [WCL])'
-        if idx >= 0:
-            line = lines[idx]
-            m_agency = re.match(r'^\(([^)]+)\)$', line)
-            if m_agency and not re.match(r'^\d+$', m_agency.group(1).strip()):
-                agency = m_agency.group(1).strip()
+            elif m_code2:
+                project_code = m_code2.group(1)
                 idx -= 1
 
-        # Remaining lines form the actual project name
-        name_lines = lines[:idx + 1]
-        project_name = " ".join(name_lines).strip()
+        # 3. Check for standalone Agency on current line using balanced parentheses: e.g. '(Central Railway (CR) - II)'
+        if idx >= 0:
+            line = lines[idx]
+            rem, tok = pop_trailing_paren(line)
+            if tok is not None and not rem:
+                if not re.match(r'^\d+$', tok) and not re.match(r'^(N\d{7,9}|[A-Z]\d{7,9})$', tok):
+                    agency = tok
+                    idx -= 1
+
+        # 4. Now process remaining lines: they may still contain trailing (Agency) and/or (Project Code) concatenated
+        remaining_text = " ".join(lines[:idx + 1]).strip()
+        curr = remaining_text
+        while True:
+            curr_stripped = curr.rstrip()
+            curr_next, tok = pop_trailing_paren(curr_stripped)
+            if tok is None:
+                break
+            
+            t = tok.strip()
+            # Check if t is 8-9 digit OCMS code
+            if not legacy_ocms and (re.match(r'^(N\d{7,9}|[A-Z]\d{7,9})$', t) or re.match(r'^\d{8,9}$', t)):
+                legacy_ocms = t
+                curr = curr_next
+                continue
+            # Check if t is Project Code (e.g. 617926)
+            elif not project_code and re.match(r'^\d{5,7}$', t):
+                project_code = t
+                curr = curr_next
+                continue
+            elif not project_code and re.match(r'^\d{4}$', t):
+                project_code = t
+                curr = curr_next
+                continue
+            # Check if t is PMGID
+            elif not pmgid and re.match(r'^\d{1,5}$', t):
+                pmgid = t
+                curr = curr_next
+                continue
+            # Check if t is Agency (if agency not yet found and t has alphabets)
+            elif not agency and any(c.isalpha() for c in t) and t not in ['-', '—', '–', 'none', 'null', 'NaN', '(-)']:
+                agency = t
+                curr = curr_next
+                continue
+            else:
+                break
+
+        project_name = curr.strip()
         if not project_name and lines:
             project_name = lines[0]
 
